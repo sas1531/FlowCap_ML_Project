@@ -1,0 +1,2035 @@
+---
+title: "FloCap_EDA.Rmd"
+author: "Shaleigh Smith - sas1531"
+date: "9/27/2018"
+output: html_document
+---
+
+
+
+---
+
+# Machine Learning Project: FlowCap AML Classificiation DREAM Challenge
+
+---
+
+## Goal: Find a machine learning method to classify AML positive and healthy patients using FLow Cytometry data.
+
+## Data: 2872 dataframes with 20,000 to 30,000 rows of fluorescent readings over a period of time (1064 seconds). Each dataframe has 8 columns: FS, SS, FL1, FL2, FL3, FL4, FL5, and TIME. There are 316 healthy patients and 43 AML positive patients. Each patient has 8 different dataframes, each which represents a tube that contains a different/varied cocktail of antibodies that should be able to be used to differentiate AML positive from negative patients. Every tube contains CD45 which is supported by the literature as a commonly used biomarker for AML. The 8th tube contains no antibodies and is used as the control. A separate dataframe is given with the AML positive/negative labels.
+
+## Methodology: Aggregate and transform the data by calculating the mean of each column in each file. Create three different dataframes to be analyzed: mean, mean normalized by control, and mean log tranfsormed & normalized by control. 
+
+## Initial Hypothesis: the dataframe with the mean log transformed and normalized by the control will give the best results. 
+  
+  ** Note that this was disproved - see the code below. 
+  
+## Re-evaluated Hypothesis: the dataframe that only calculated the mean will give the best results because this dataframe has the greatest amount of variance between the AML postiive and healthy patients.
+  
+  ** Note that this was supported by the code and results below. 
+  ** Note that the mean control-normalized data was also analyzed; however, it was not as successful as the mean non-normalized data.
+  
+## Results: The best method for classification was bagged tree classification using features FS, SS, and FL3 (supported by recursive feature selection). The result was an AUC 0.789 and accuracy of 0.8967. 
+
+## Future: Using flow cytometry specific data analysis packages could increase accuracy and AUC significantly (most DREAM challanege winners used flow-specific packages).
+
+
+---
+
+```{r Import libraries}
+
+library(RCurl)
+library(tidyverse)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(lubridate)
+library(data.table)
+library(abind)
+library(ggfortify)
+library(OpenImageR)
+library(fastICA)
+library(NMF)
+library(cluster)
+library(factoextra)
+library(ggpubr)
+library(Rtsne)
+library(caret)
+library(pROC)
+library(randomForest)
+library(tree)
+library(neuralnet)
+library(nnet)
+library(MASS)
+
+```
+
+```{r Import all Flo datasets, Create a list of all datasets}
+
+# Path to folder that holds multiple .csv files
+folder <- "~/Desktop/Desktop/BMI_Fall_2018/Machine_Learning/FlowCap_Machine_Learning_Project/CSV_test/"       
+
+# Create list of all .csv files in folder
+file_list <- list.files(path=folder, pattern="*.csv") 
+
+# Read in each .csv file in file_list and create a data frame with the same name as the .csv file
+for (i in 1:length(file_list)){
+  assign(file_list[i], 
+  read.csv(paste(folder, file_list[i], sep=''))
+)}
+```
+
+```{r Create a dataframe of all of the flow datasets}
+
+# Create a dataframe from the now imported flow datasets 
+l_df <- lapply(ls(), function(x) if (class(get(x)) == "data.frame") get(x))
+tail(l_df)
+
+```
+
+```{r View l_df and create new dataframe with the 2872 files}
+
+# Check length of l_df
+length(l_df)
+
+# Remove any empty data frames 
+# Length should be 2872
+# df <- l_df[-c(2873)]
+# length(df)
+
+```
+
+```{r create dataframe from the list of files, order this for later binding}
+
+#file_list
+
+# Create a data frame from the file list using file name 
+list_df <- ldply(file_list, data.frame)
+
+# Add row id to the new list_df dataframe
+# Label this as the unordered ID
+list_df <- tibble::rowid_to_column(list_df, 'ID')
+colnames(list_df) <- c('ID_unordered', 'file')
+
+# Remove the first 15 letters of the file name (this repeats)
+list_df$file <- substring(list_df$file, 15)
+
+# Order the dataframe by file name (this will be the correct order for labelling later)
+list_df <- list_df[order(list_df$file),]
+
+# Create a new row id, this is the ordered row ID
+list_df <- tibble::rowid_to_column(list_df, 'ID')
+
+# View data frame 
+as.tibble(list_df)
+
+```
+
+```{r Create df with all values as numeric}
+
+# Change all values in each dataframe to numeric 
+
+df <- lapply(df, function(x) {
+  x[] <- lapply(x, as.numeric)
+  x
+})
+
+#head(df)
+#df[[8]]
+
+```
+
+```{r Check the length of df (should be 2872)}
+
+# Confirm that the lenghth of the dataframe is 2872
+length(df)
+
+```
+
+```{r Mulitply every value in the dataframe by 1000}
+
+# This was orignally used to cross reference data points
+# DO NOT do this transformation in the final dataset
+
+#Multi = function(x) ifelse(x!=0, (x*1000), NA)
+
+#df <- lapply(df, function(x) {
+  #x[] <- lapply(x, Multi)
+  #x
+#})
+
+#head(df)
+
+```
+
+```{r Create the initial mean dataframe}
+
+# Find the mean of each column in sub-dataframe one
+mean_df_test <- lapply(df[[1]], mean, na.rm = TRUE)
+
+# Bind this to a new dataframe by row 
+mean_df_test <- do.call(rbind.data.frame, mean_df_test)
+
+# Make the new data into a dataframe
+# Label the column as 1
+# Transpose the dataframe so that the Flow values are the columns and the dataframe number is the row
+mean_df_test <- (as.data.frame(mean_df_test))
+colnames(mean_df_test) <- c("1")
+mean_df_test <- t(mean_df_test)
+
+
+# Repeat this with the second sub-dataframe to confirm that this method works
+# Bind the new mean data 
+mean_df_test2 <- lapply(df[[2]], mean, na.rm = TRUE)
+mean_df_test2 <- do.call(rbind.data.frame, mean_df_test2)
+mean_df_test2 <- (as.data.frame(mean_df_test2))
+colnames(mean_df_test2) <- c("2")
+mean_df_test2 <- t(mean_df_test2)
+mean_df_test2 <- rbind(mean_df_test, mean_df_test2)
+mean_df_test2
+as.tibble(mean_df_test2)
+
+# Use this format to create a mean function (see below)
+
+```
+
+```{r Create mean dataframe}
+
+# Using mean_df_test (the first mean row only):
+# Iterate through each dataframe
+# Find the mean of each column in each dataframe
+# Add the new mean data to the mean_df_test dataframe using rbind
+# NOTE - the first mean row has already been created so start at the second dataframe (2)
+
+for (i in 2:length(df)) {
+  x <- lapply((df[[i]]), mean, na.rm = TRUE)
+  x <- do.call(rbind.data.frame, x)
+  x <- (as.data.frame(x))
+  x <- t(x)
+  x <- as.data.frame(x)
+  
+  mean_df_test <- rbind(mean_df_test, x)
+  mean_df_test
+}
+
+# Now each row is the column means of a single dataframe, total length of 2872
+as.tibble(mean_df_test)
+
+```
+
+```{r Label mean columns and save as csv}
+
+# Label each column
+colnames(mean_df_test) <- c("FS", "SS", "FL1", "FL2", "FL3", "FL4", "FL5", "TIME")
+
+# Save the AML_Label datframe to projet folder 
+write.csv(mean_df_test, file = 'AML_Mean.csv', row.names = FALSE)
+
+```
+
+```{r Log transform}
+
+# Create a log function
+logNew = function(x) ifelse(x!=0, log10(x), NA)
+
+# Apply the log function to the entire mean dataframe
+df_log <- apply(mean_df_test, 2, logNew)
+df_log <- as.data.frame(df_log)
+
+as.tibble(df_log)
+
+```
+
+```{r Create row ID for df_log, merge to list}
+
+# Create the row id column
+df_log <- tibble::rowid_to_column(df_log, 'ID_unordered')
+
+# Merge the list_df dataframe with the log dataframe using UNORDERED ID
+# This gives each of the rows it's correct file name
+FL_merge <- merge(df_log, list_df, by = 'ID_unordered')
+#write.csv(FL_merge, file = 'FL_merge.csv', row.names = FALSE)
+
+# Re-order the dataframe
+# Order the dataframe by file name (this will be the correct order for labelling later)
+FL_merge <- FL_merge[order(FL_merge$file),]
+as.tibble(FL_merge)
+
+
+```
+
+```{r Select FL columns for downstream clustering analysis}
+
+# Select only for FS, SS, and FL columns
+FL <- dplyr::select(FL_merge, -ID, -file, -ID_unordered, -TIME, -file)
+as.tibble(FL)
+
+```
+
+```{r Normalize data}
+
+# Create normalized dataframe
+FL_norm <- FL
+
+# Noramlize the data by dividing tubes 1-7 by the 8th (control) tube
+for (i in 1:2872){
+  for (j in ((i-7):(i))){
+    if (i%%8 == 0){
+      FL_norm[(j),] <- (FL_norm[(j),] / (FL_norm[i,]))
+    }
+  }
+}
+
+as.tibble(FL_norm)
+
+```
+
+```{r Check FL normalized data distribution with and without outliers}
+
+# Code in this chunk done by Lisa Katsnelson
+
+# Normalized data distribution
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FS), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$SS), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FL1), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FL2), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FL3), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FL4), binwidth = 0.005)
+ggplot(data = FL_norm) + geom_histogram(mapping = aes( x = FL_norm$FL5), binwidth = 0.005)
+
+
+# Remove outliers and visualize distribution
+FL_remove_outlier <- subset(FL_norm, FS < 1.5 & SS < 1.5 & FL1 < 1.5 & FL2 < 1.5 & FL3 < 1.5 & FL4 < 1.5 & FL5 < 1.5)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FS), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$SS), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FL1), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FL2), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FL3), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FL4), binwidth = 0.005)
+ggplot(data = FL_remove_outlier) + geom_histogram(mapping = aes( x = FL_remove_outlier$FL5), binwidth = 0.005)
+
+```
+
+```{r Evaluate initial PCA and kmeans, non-normalized, normalized, and norm outlier removed}
+
+set.seed(1234)
+
+# Non-normalized PCA and Kmeans
+PCA <- prcomp(FL)
+screeplot(PCA, type='lines')
+autoplot(PCA)
+autoplot(kmeans(FL, 2), data = FL) + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+
+# Normalized PCA and Kmeans
+PCA_1 <- prcomp(FL_norm)
+screeplot(PCA_1, type='lines')
+autoplot(PCA_1)
+autoplot(kmeans(FL_norm, 2), data = FL_norm) + scale_colour_manual(values = c("#D6604D","#4393C3"))
+autoplot(kmeans(FL_norm, 2), data = FL_norm) + scale_colour_manual(values = c("#D6604D","#4393C3")) + xlim(-0.05, 0.05) + ylim(-0.05, 0.05)
+
+
+# Normalized - outliers removed - PCA and Kmeans
+PCA_2 <- prcomp(FL_remove_outlier)
+screeplot(PCA_2, type='lines')
+autoplot(PCA_2)
+autoplot(kmeans(FL_remove_outlier, 2), data = FL_remove_outlier) + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+
+```
+
+```{r Delete 8th row in all FL dataframes}
+
+### The code in this chunk was written by Lisa Katsnelson
+
+# Create the row delete function
+nth.delete <- function(dataframe, n)dataframe[-(seq(n,to=nrow(dataframe),by=n)),]
+
+# Delete every 8th row in the dataframe for the non-normalized, normalized, and normalized with outliers removed dataframes 
+# This removes all control tubes 
+test <- nth.delete(FL, 8)
+test_norm <- nth.delete(FL_norm, 8)
+
+as.tibble(test_norm)
+
+```
+
+```{r PCA and kmeans with control removed for all FL dataframes}
+
+set.seed(1234567)
+
+# Non-normalized PCA and Kmeans controls removed
+PCA <- prcomp(test)
+screeplot(PCA, type='lines')
+autoplot(PCA)
+kmeans_test <- kmeans(test, 2)
+autoplot(kmeans_test, data = test) + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+
+# Normalized PCA and Kmeans controls removed
+PCA_1 <- prcomp(test_norm)
+screeplot(PCA_1, type='lines')
+autoplot(PCA_1)
+autoplot(kmeans(test_norm, 2), data = test_norm) + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+```
+
+```{r T-SNE}
+
+set.seed(888)
+
+# tsne for the non-normalized data
+tsne1 <- Rtsne(test, dims = 2, perplexity=30, verbose=TRUE) 
+tsne_plot1 <- data.frame(x = tsne1$Y[,1], y = tsne1$Y[,2], col = kmeans_test$cluster)
+
+# tsne for the normalized data 
+tsne2 <- Rtsne(test_norm, dims = 2, perplexity=30, verbose=TRUE) 
+tsne_plot2 <- data.frame(x = tsne2$Y[,1], y = tsne2$Y[,2], col = kmeans_test$cluster)
+
+```
+
+```{r tsne plots}
+
+# tsne plot for the non-normalized data
+ggplot(tsne_plot1) + geom_point(aes(x=x, y=y, color = col))
+
+# tsne plot for the normalized data
+ggplot(tsne_plot2) + geom_point(aes(x=x, y=y, color = col))
+
+```
+
+
+---
+
+
+```{r Separate the 7 tubes}
+
+### The code in this chunk was written by Lisa Katsnelson
+
+# Separating tubes out into 7 dataframes
+# FL dataframe, sequencing out rows starting at 1 going by every 7th row (8th row was taken out)
+tube1 <- test_norm[seq(1, nrow(test_norm), 7), ]
+as.tibble(tube1)
+
+tube2 <- test_norm[seq(2, nrow(test_norm), 7), ]
+as.tibble(tube2)
+
+tube3 <- test_norm[seq(3, nrow(test_norm), 7), ]
+as.tibble(tube3)
+
+tube4 <- test_norm[seq(4, nrow(test_norm), 7), ]
+as.tibble(tube4)
+
+tube5 <- test_norm[seq(5, nrow(test_norm), 7), ]
+as.tibble(tube5)
+
+tube6 <- test_norm[seq(6, nrow(test_norm), 7), ]
+as.tibble(tube6)
+
+tube7 <- test_norm[seq(7, nrow(test_norm), 7), ]
+as.tibble(tube7)
+
+
+```
+
+```{r Row ID for normalized removed outlier dataframe}
+
+# Add the row ID for the normalized removed outlier data frame to bind to AML labeling 
+FL_norm_ID <- tibble::rowid_to_column(test_norm, 'ID')
+as.tibble(FL_norm_ID)
+
+```
+
+```{r Imoprt the AML dataset and merge this with the list of files}
+
+# Import the AML dataset and remove every 8th row (control tubes)
+AML_Label <- read.csv('AML.csv')
+AML_Label <- nth.delete(AML_Label, 8)
+
+# Add row ID to the dataframe
+AML_Label <- tibble::rowid_to_column(AML_Label, 'ID')
+
+# Label columns names
+colnames(AML_Label) <- c('ID', 'file', 'tube', 'Sample', 'Class')
+
+# Merge the normalized removed outliers dataframe with the AML class label dataframe
+AML_Label <- merge(FL_norm_ID, AML_Label, by = 'ID')
+
+as.tibble(AML_Label)
+
+```
+
+```{r Write out AML_Label}
+
+# Save the AML_Label datframe to projet folder 
+write.csv(AML_Label, file = 'AML_Label.csv', row.names = FALSE)
+
+```
+
+```{r PCA of normalized dataframe with Class Labels}
+
+# Plot PCA of normalized removed outlier dataframe with Class Labels
+autoplot(prcomp(test_norm), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+# No significant clustering
+
+```
+
+```{r PCA by tube combination}
+
+# Plot PCA for each FL tube combination
+# No significant clustering by Class
+
+FL_1_2 <- dplyr::select(test_norm, FL1, FL2)
+autoplot(prcomp(FL_1_2), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_1_3 <- dplyr::select(test_norm, FL1, FL3)
+autoplot(prcomp(FL_1_3), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_1_4 <- dplyr::select(test_norm, FL1, FL4)
+autoplot(prcomp(FL_1_4), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_1_5 <- dplyr::select(test_norm, FL1, FL5)
+autoplot(prcomp(FL_1_5), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_2_3 <- dplyr::select(test_norm, FL2, FL3)
+autoplot(prcomp(FL_2_3), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_2_4 <- dplyr::select(test_norm, FL2, FL4)
+autoplot(prcomp(FL_2_4), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_2_5 <- dplyr::select(test_norm, FL2, FL5)
+autoplot(prcomp(FL_1_4), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_3_4 <- dplyr::select(test_norm, FL3, FL4)
+autoplot(prcomp(FL_3_4), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_3_5 <- dplyr::select(test_norm, FL3, FL5)
+autoplot(prcomp(FL_3_5), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+FL_4_5 <- dplyr::select(test_norm, FL4, FL5)
+autoplot(prcomp(FL_4_5), data = AML_Label, colour = 'Class') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+```
+
+```{r Create AML dataframe}
+
+as.tibble(AML_Label)
+
+# Create AML dataframe with only Class and FLow data
+AML <- dplyr::select(AML_Label, -ID, -ID, -file, -tube, -Sample)
+as.tibble(AML)
+
+
+```
+
+```{r Visualize distribution of Flow values by Tube}
+
+# Plot flow values by tube and color with Class
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FS, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = SS, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FL1, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FL2, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FL3, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FL4, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+ggplot(data = AML_Label) + geom_point(mapping = aes(x = tube, y = FL5, color = Class), position = 'jitter') + scale_colour_manual(values = c("#D6604D","#4393C3"))
+
+# No significant distribution or correlation 
+
+```
+
+---
+
+
+---
+
+## Machine Learning: Mean Log Normalized with control removed 
+
+---
+
+```{r View AML_Label}
+
+# Save the AML_Label datframe to projet folder 
+write.csv(AML_Label, file = 'AML_Label.csv', row.names = FALSE)
+
+```
+
+```{r Training and Test Sets AML_Label}
+
+# Establish the training data set size 
+train_size <- floor(0.80 * nrow(AML_Label))
+train_size
+
+# Take a random sample and make this into the training set
+set.seed(1234)
+training_pos <- sample(seq_len(nrow(AML_Label)), size = train_size)
+
+# Define the training set and the test set
+training <- AML_Label[training_pos,]
+test <- AML_Label[-training_pos,]
+
+# Check the dimensions (row/column) of the training and test sets
+dim(training)
+dim(test)
+
+```
+
+---
+
+
+
+---
+
+## Logistic Regression
+
+---
+
+```{r Set Control for log regression}
+
+# set the controls for the train function 
+ctrl <- trainControl(method = "repeatedcv", repeats = 15,classProbs = T, savePredictions = T)
+
+```
+
+```{r Log regression train}
+
+# Train against all FL
+log_regression <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training , method = "glm", family = "binomial", trControl = ctrl)
+
+log_regression
+
+```
+
+```{r Log Regression Summary}
+
+# View logistic regression summary
+summary(log_regression)
+
+```
+
+```{r Log Regression ROC}
+
+# Plot the roc curve for sensitivity and specificity
+plot(x = roc(predictor = log_regression$pred$aml, 
+             response = log_regression$pred$obs)$specificities, 
+     y = roc(predictor = log_regression$pred$normal, 
+             response = log_regression$pred$obs)$sensitivities, 
+     col= "#D6604D", xlim = c(1, 0), type ="l", ylab = "Sensitivity", 
+     xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = log_regression$pred$aml, 
+      response = log_regression$pred$obs)$auc, 
+      sep = ""), col = c("#D6604D"), fill = c("#D6604D"))
+
+```
+
+```{r Log Regression Cross Validation}
+
+# Predict Class
+log_regression_predict <- predict(log_regression, newdata = test)
+
+# Confusion matrix
+confusionMatrix(log_regression_predict, reference = test$Class)
+
+```
+
+```{r Log Regression FS and SS}
+
+# Train against FS and SS 
+log_regression1 <- train(Class ~ FS + SS, data = training , method = "glm", family = "binomial", trControl = ctrl)
+
+log_regression1
+
+```
+
+```{r Summary log regression FS and SS}
+
+# Summary log regression with FS and SS
+summary(log_regression1)
+
+```
+
+```{r Log Regression Cross Validation FS and SS}
+
+# Predict Class Fl4
+log_regression_predict1 <- predict(log_regression1, newdata = test)
+
+# Confusion matrix
+confusionMatrix(log_regression_predict1, reference = test$Class)
+
+```
+
+---
+
+
+
+---
+
+## Random Forest
+
+---
+
+```{r Random Forest train}
+
+set.seed(7777)
+
+# Set control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train using random forest
+RF <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, method = 'rf', ntree = 2500)
+
+```
+
+```{r View random forest summary}
+
+# View random forest
+RF
+
+```
+
+```{r Random Forest Cross Validation}
+
+set.seed(7777)
+
+# Test Random Forest
+RF_predict <- predict(RF, newdata = test)
+
+# View confustion Matrix 
+confusionMatrix(RF_predict, reference = test$Class)
+
+```
+
+```{r Random Forest ROC}
+
+# Plot the roc curve for sensitivity and specificity
+plot(x = roc(predictor = RF$pred$aml, 
+             response = RF$pred$obs)$specificities, 
+     y = roc(predictor = RF$pred$normal, 
+             response = RF$pred$obs)$sensitivities, 
+     col= "#D6604D", xlim = c(1, 0), type ="l", ylab = "Sensitivity", 
+     xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = RF$pred$aml, 
+      response = RF$pred$obs)$auc, 
+      sep = ""), col = c("#D6604D"), fill = c("#D6604D"))
+
+```
+
+---
+
+
+
+---
+
+## Bagged tree
+
+---
+
+
+```{r Bagged Tree}
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification
+bagged <- randomForest(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 7)
+
+```
+
+```{r View bagged tree summary}
+
+# Bagged tree summary
+bagged
+
+```
+
+```{r Bagged Tree Cross Validation}
+
+# Test bagged tree
+bagged_predict <- predict(bagged, newdata = test)
+
+# View confusion matrix
+confusionMatrix(bagged_predict, reference = test$Class)
+
+```
+
+```{r Bagged tree ROC}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc <- roc(training$Class, bagged$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc, print.auc = TRUE, col = "#D6604D", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+```
+
+---
+
+
+
+---
+
+## SVM
+
+---
+
+```{r SVM}
+
+set.seed(888)
+
+# Train SVM
+svm_rad <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training, method = "svmRadial", tuneLength = 10, trControl = ctrl)
+
+```
+
+```{r SVM Summary}
+
+# View SVM summary
+svm_rad
+
+```
+
+```{r SVM ROC}
+
+# Plot SVM ROC
+plot(x = roc(predictor = svm_rad$pred$aml, response = svm_rad$pred$obs)$specificities, y = roc(predictor = svm_rad$pred$normal, response = svm_rad$pred$obs)$sensitivities, col= "#B2182B", xlim = c(1, 0), type ="l", ylab = "Sensitivity", xlab = "Specificity")
+
+```
+
+```{r SVM Cross Validation}
+
+# Predict Classes using test data
+svm_rad_test <- predict(svm_rad, newdata = test)
+
+# View Confustion Matrix
+confusionMatrix(svm_rad_test, reference = test$Class)
+
+```
+
+---
+
+
+
+---
+
+## Classification tree
+
+---
+
+```{r Classification Tree}
+
+set.seed(12848)
+
+# Train Classification Tree
+class_tree <- tree(Class ~ FS + FL3, data = training, split = "gini")
+plot(class_tree)
+text(class_tree, cex = 0.45)
+
+```
+
+```{r Classification Tree Cross Validation}
+
+# Test Classification Tree
+class_tree_predict <- predict(class_tree, newdata = test, type = 'class')
+
+# View Classificaiton Tree matrix
+confusionMatrix(class_tree_predict, reference = test$Class)
+
+```
+
+
+---
+
+
+
+---
+
+## Neural Network 1
+
+---
+
+```{r Neural Network}
+
+#mSet control
+ctrl <- trainControl(method = "repeatedcv", number = 2, repeats = 5, classProbs = TRUE, savePredictions = T)
+
+#Decrease 'by' to increase accurary
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 2, by = 0.5),
+                        decay = seq(from = 0.1, to = 0.3, by = 0.05))
+
+set.seed(1112)
+
+# Train data frame using neural network methods, tune to nnetGrid
+nnet <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training, method = "nnet", trControl = ctrl,tuneGrid = nnetGrid, verbose = F)
+
+nnet
+
+```
+
+```{r Neural Network Prediction}
+
+# Predict neural network with test data
+nn_predict <- predict(nnet, newdata = test)
+
+# Confusion Matrix
+confusionMatrix(nn_predict, reference = test$Class)
+
+```
+
+
+---
+
+
+
+---
+
+
+
+---
+
+## Machine Learning: Mean
+
+---
+
+Using the mean will increase variance and increase classification accuracy in comparison to the log normalized data (loss of information)
+
+* Note - this proved to be correct using Bagged Random Forest after feature selection of FS and SS as well as selection of FL3 based on literature. 
+
+---
+
+## AML Mean Dataframe:
+
+---
+
+```{r AML Mean Dataset Mean}
+
+# Read AML mean dataset
+df_mean <- read.csv("AML_Mean.csv")
+
+# Label rows by unordered ID
+df_mean <- tibble::rowid_to_column(df_mean, 'ID_unordered')
+
+as.tibble(df_mean)
+
+```
+
+```{r AML Labels Mean}
+
+# Read AML Class labels dataset
+df_aml_label <- read.csv("AML.csv")
+
+# Label row names with ID, rename columns, remove file name
+df_aml_label <- tibble::rowid_to_column(df_aml_label, 'ID')
+colnames(df_aml_label) <- c('ID', 'file', 'tube', 'sample', 'Class')
+df_aml_label <- dplyr::select(df_aml_label, -file)
+
+as.tibble(df_aml_label)
+
+```
+
+```{r FL Merge Mean}
+
+# Read FL Merge Dataset
+df_fl_merge <- read.csv("FL_merge.csv")
+as.tibble(df_fl_merge)
+
+# Select only for unordered ID and file name
+df_fl <- dplyr::select(df_fl_merge, -FS, -SS, -FL1, -FL2, -FL3, -FL4, -FL5, -TIME, -ID)
+as.tibble(df_fl)
+
+```
+
+```{r Mean Merged}
+
+# Create ordered and unordered columns by row number
+df_mean_aml <- merge(df_mean, df_fl, by = 'ID_unordered')
+df_mean_aml <- df_mean_aml[order(df_mean_aml$file),]
+df_mean_aml <- tibble::rowid_to_column(df_mean_aml, 'ID')
+
+# Merge dataframes by ID
+df_mean_aml <- merge(df_aml_label, df_mean_aml, by = 'ID')
+
+
+as.tibble(df_mean_aml)
+
+```
+
+```{r Remove the control tubes from df_mean_aml}
+
+# Remove control tubes
+df_mean_aml_8 <- nth.delete(df_mean_aml, 8)
+
+```
+
+```{r Normalized dataframe}
+
+# Create normalized dataframe
+df_norm <- df_mean_aml
+df_norm <- dplyr::select(df_norm, FS, SS, FL1, FL2, FL3, FL4, FL5)
+as.tibble(df_norm)
+
+```
+
+```{r Normalization}
+
+# Noramlize the data by dividing tubes 1-7 by the 8th (control) tube
+for (i in 1:2872){
+  for (j in ((i-7):(i))){
+    if (i%%8 == 0){
+      df_norm[(j),] <- (df_norm[(j),] / (df_norm[i,]))
+    }
+  }
+}
+
+as.tibble(df_norm)
+
+```
+
+```{r Remove Control tubes Mean}
+
+# Create the row delete function
+nth.delete <- function(dataframe, n)dataframe[-(seq(n,to=nrow(dataframe),by=n)),]
+
+# Delete every 8th row in the dataframe for the non-normalized, normalized, and normalized with outliers removed dataframes 
+# This removes all control tubes 
+df_norm <- nth.delete(df_norm, 8)
+
+as.tibble(df_norm)
+
+```
+
+```{r Normalized Class Dataframe Mean}
+
+# Merge normalized dataframe with Class labels 
+df_norm_class <- dplyr::select(df_mean_aml_8, Class)
+df_norm_class <- tibble::rowid_to_column(df_norm_class, 'ID')
+df_norm <- tibble::rowid_to_column(df_norm, 'ID')
+
+df_norm_class <- merge(df_norm, df_norm_class, by = 'ID')
+as.tibble(df_norm_class)
+
+```
+
+```{r Remove Outlier PCA Mean}
+
+# Remove outlier
+remove_outlier <- subset(df_norm, FS < 10 & SS < 10 & FL1 < 10 & FL2 < 10 & FL3 < 10 & FL4 < 10 & FL5 < 10)
+
+# PCA for data, outliers removed
+# Confirmation of no clustering
+PCA <- prcomp(remove_outlier)
+screeplot(PCA, type='lines')
+autoplot(PCA)
+autoplot(kmeans(remove_outlier, 2), data = remove_outlier) + scale_colour_manual(values = c("blue","#4393C3"))
+
+```
+
+---
+
+
+
+---
+
+## Machine Learning Algorithms: Mean with control removed (not normalized to control)
+
+---
+
+```{r Training and Test Sets df_mean_aml_8}
+
+# Establish the training data set size 
+train_size1 <- floor(0.75 * nrow(df_mean_aml_8))
+train_size1
+
+# Take a random sample and make this into the training set
+set.seed(1234)
+training_pos1 <- sample(seq_len(nrow(df_mean_aml_8)), size = train_size1)
+
+# Define the training set and the test set
+training1 <- df_mean_aml_8[training_pos1,]
+test1 <- df_mean_aml_8[-training_pos1,]
+
+# Check the dimensions (row/column) of the training and test sets
+dim(training1)
+dim(test1)
+
+```
+
+---
+
+
+
+---
+
+## Linear Discriminant Analysis
+
+---
+
+```{r LDA Mean}
+
+# Train using LDA
+LDA <- lda(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training1, cv= T)
+
+```
+
+```{r View LDA Mean}
+
+# View LDA
+# Mean dataframe shows greater disparity between AML positive and healthy patients than the log-normalized dataframe 
+LDA
+
+```
+
+```{r Predict LDA Mean}
+
+# Predict LDA
+LDA_predict <- predict(LDA, newdata=test1)
+
+# LDA confusino matrix
+confusionMatrix(LDA_predict$class, reference = test1$Class)
+
+```
+
+---
+
+
+
+---
+
+## Tree Classification
+
+---
+
+
+```{r Tree classification Mean}
+
+# Run tree classification
+set.seed(828282)
+class_tree <- tree(Class ~ FS + SS + FL3, data = training1, split = "gini")
+
+# Plot tree
+plot(class_tree)
+text(class_tree,cex=0.45)
+
+```
+
+```{r Tree Classification Summary Mean}
+
+# View tree classification summary
+summary(class_tree)
+
+```
+
+```{r Tree Classification Prediction Mean}
+
+# Predict tree classification
+class_tree_test <- predict(class_tree, newdata = test1, type = "class")
+
+# Confusion matrix
+confusionMatrix(class_tree_test, reference = test1$Class)
+
+```
+
+```{r Fit classification tree Mean}
+
+# Fit classification tree
+fit_class_tree <- cv.tree(class_tree,FUN=prune.misclass, K = 15)
+fit_class_tree
+
+```
+
+```{r Prune classification tree Mean}
+
+# Prune and plot classification tree
+prune_class_tree=prune.misclass(class_tree, best = 4)
+plot(prune_class_tree)
+text(prune_class_tree,cex=0.45)
+
+```
+
+```{r Prune Classification tree Mean}
+
+# Predict on pruned classification tree
+class_tree_test_pruned <- predict(prune_class_tree, newdata = test1, type = "class")
+
+# Confusion Matrix
+confusionMatrix(class_tree_test_pruned, reference = test1$Class)
+
+```
+
+```{r Classification tree pcc Mean}
+
+# PCC for classification tree
+cm_tree <- table(pred=class_tree_test, true = test1$Class)
+cm_tree
+pcc(cm_tree, st.dev=TRUE)
+
+classification_test <- predict(class_tree, newdata = test1, type = "class")
+
+```
+
+---
+
+
+
+---
+
+## Random Forest
+
+---
+
+```{r Random Forest Mean}
+
+set.seed(8686)
+
+# Set control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train using random forest on all variables 
+RF1 <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training1, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, method = 'rf')
+
+```
+
+```{r View random forest summary Mean}
+
+# View random forest
+RF1
+
+```
+
+```{r Random Forest Cross Validation Mean}
+
+set.seed(7777)
+
+# Test Random Forest
+RF_predict1 <- predict(RF1, newdata = test1)
+
+# View confustion Matrix 
+confusionMatrix(RF_predict1, reference = test1$Class)
+
+```
+
+```{r Random Forest ROC Mean}
+
+# Plot the roc curve for sensitivity and specificity
+plot(x = roc(predictor = RF1$pred$aml, 
+             response = RF1$pred$obs)$specificities, 
+     y = roc(predictor = RF1$pred$normal, 
+             response = RF1$pred$obs)$sensitivities, 
+     col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", 
+     xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = RF1$pred$aml, 
+      response = RF1$pred$obs)$auc, 
+      sep = ""), col = c("blue"), fill = c("blue"))
+
+```
+
+---
+
+
+
+---
+
+## Bagged Tree Classification
+
+---
+
+```{r Bagged Tree 1 Mean}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification
+bagged1 <- randomForest(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training1, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 7)
+
+```
+
+```{r View bagged tree summary 1 Mean}
+
+# Bagged tree summary
+bagged1
+
+```
+
+```{r Bagged ROC 1 Mean}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc1 <- roc(training1$Class, bagged1$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc1, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+```
+
+```{r Bagged Tree Cross Validation 1 Mean}
+
+# Test bagged tree
+bagged_predict1 <- predict(bagged1, newdata = test1)
+
+# View confusion matrix
+confusionMatrix(bagged_predict1, reference = test1$Class)
+
+```
+
+---
+
+
+
+---
+
+## Feature Selection
+
+---
+
+```{r Feature Selection Mean}
+
+# Select only for fluorescent values
+
+df_mean_aml[,8:ncol(df_mean_aml)-2]
+#df_mean_aml[,4]
+
+```
+
+```{r Recursive Feature Selection Mean}
+
+set.seed(134)
+
+# Recursive feature selection, random forest
+rfe <- rfe(df_mean_aml[,8:ncol(df_mean_aml)-2], df_mean_aml[,4],
+                  sizes = c(2, 3, 5, 7),
+                  rfeControl = rfeControl(functions = caretFuncs,
+                                          number = 2), method = "rf") 
+
+rfe
+rfe$variables
+
+# Top variables: FS, SS, FL4
+
+```
+
+```{r RFE Mean}
+
+# View feature selection
+rfe
+
+```
+
+---
+
+
+
+---
+
+## Bagged 2
+
+---
+
+```{r Bagged Tree 2 Mean}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 20, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification on selected features and FL3 (supported by literature)
+bagged2 <- randomForest(Class ~ FS + SS + FL3, data = training1, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 3, ntree = 5000)
+
+```
+
+```{r View bagged tree summary 2 Mean}
+
+# Bagged tree summary
+bagged2
+
+```
+
+```{r Bagged ROC 2 Mean}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc2 <- roc(training1$Class, bagged2$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc2, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+
+```
+
+```{r Bagged Tree Cross Validation 2 Mean}
+
+set.seed(888)
+
+# Test bagged tree
+bagged_predict2 <- predict(bagged2, newdata = test1)
+
+# View confusion matrix
+confusionMatrix(bagged_predict2, reference = test1$Class)
+
+```
+
+```{r Bagged2 F measure Mean}
+
+#as.tibble(bagged_predict2)
+#levels(bagged_predict2)
+
+bagged_predict2_f <- factor(as.numeric(bagged_predict2))
+levels(bagged_predict2_f)
+levels(bagged_predict2_f)[1] <- "1"
+levels(bagged_predict2_f)[2] <- "0"
+bagged_predict2_f <- as.numeric(as.character(bagged_predict2_f))
+
+#as.tibble(bagged_predict2_f)
+
+Class_f <- factor(as.numeric(test1$Class))
+levels(Class_f)
+levels(Class_f)[1] <- "1"
+levels(Class_f)[2] <- "0"
+Class_f <- as.numeric(as.character(Class_f))
+
+#as.tibble(Class_f)
+
+F.measure.single(bagged_predict2_f, Class_f)
+
+
+```
+
+---
+
+
+
+
+---
+
+## Bagged 3
+
+---
+
+```{r Bagged Tree 3 Mean}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 20, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification using scatter
+bagged3 <- randomForest(Class ~ FS + SS, data = training1, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 2, ntree = 5000)
+
+```
+
+```{r View bagged tree summary 3 Mean}
+
+# Bagged tree summary
+bagged3
+
+```
+
+```{r bagged ROC 3 Mean}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc3 <- roc(training1$Class, bagged3$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc3, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+```
+
+```{r Bagged Tree Cross Validation 3 Mean}
+
+set.seed(888)
+
+# Test bagged tree
+bagged_predict3 <- predict(bagged3, newdata = test1)
+
+# View confusion matrix
+confusionMatrix(bagged_predict3, reference = test1$Class)
+
+```
+
+---
+
+
+
+---
+
+## Logistic Regression
+
+---
+
+```{r Log regression train Mean}
+
+# Train against all FL
+log_regression1 <- train(Class ~ FS + SS + FL3, data = training1 , method = "glm", family = "binomial", trControl = ctrl)
+
+log_regression1
+
+```
+
+```{r Log Regression Summary Mean}
+
+# View logistic regression summary
+summary(log_regression1)
+
+```
+
+```{r Log Regression ROC}
+
+# Plot the roc curve for sensitivity and specificity
+plot(x = roc(predictor = log_regression1$pred$aml, 
+             response = log_regression1$pred$obs)$specificities, 
+     y = roc(predictor = log_regression1$pred$normal, 
+             response = log_regression1$pred$obs)$sensitivities, 
+     col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", 
+     xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = log_regression1$pred$aml, 
+      response = log_regression1$pred$obs)$auc, 
+      sep = ""), col = c("blue"), fill = c("blue"))
+
+```
+
+```{r Log Regression Cross Validation Mean}
+
+# Predict Class
+log_regression_predict1 <- predict(log_regression1, newdata = test1)
+
+# Confusion matrix
+confusionMatrix(log_regression_predict1, reference = test1$Class)
+
+```
+
+---
+
+
+
+---
+
+## SVM Linear
+
+---
+
+```{r SVM Linear Mean}
+
+set.seed(888)
+
+# Train SVM
+svm_lin1 <- train(Class ~ FS + SS + FL3, data = training1, method = "svmLinear", tuneLength = 10, trControl = ctrl)
+
+```
+
+```{r SVM Linear Summary Mean}
+
+# View SVM summary
+svm_lin1
+
+```
+
+```{r SVM Linear ROC Mean}
+
+# Plot SVM ROC
+plot(x = roc(predictor = svm_lin1$pred$aml, response = svm_lin1$pred$obs)$specificities, y = roc(predictor = svm_lin1$pred$normal, response = svm_lin1$pred$obs)$sensitivities, col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = svm_lin1$pred$aml, 
+      response = svm_lin1$pred$obs)$auc, 
+      sep = ""), col = c("blue"), fill = c("blue"))
+
+```
+
+```{r SVM Linear Cross Validation Mean}
+
+# Predict Classes using test data
+svm_lin_test1 <- predict(svm_lin1, newdata = test1)
+
+# View Confustion Matrix
+confusionMatrix(svm_lin_test1, reference = test1$Class)
+
+```
+
+---
+
+
+
+---
+
+## Neural Network
+
+---
+
+```{r Neural Network Mean}
+
+#Set control
+ctrl <- trainControl(method = "repeatedcv", number = 2, repeats = 5, classProbs = TRUE, savePredictions = T)
+
+#Decrease 'by' to increase accurary
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 2, by = 0.5),
+                        decay = seq(from = 0.1, to = 0.3, by = 0.05))
+
+set.seed(1112)
+
+#train data frame using neural network methods, tune to nnetGrid
+nnet_mean <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training1, method = "nnet", trControl = ctrl,tuneGrid = nnetGrid, verbose = F)
+
+nnet_mean
+
+```
+
+```{r neural network prediction Mean}
+
+# Neural network prediction
+nn_predict_mean <- predict(nnet_mean, newdata = test1)
+
+# Confusion matrix
+confusionMatrix(nn_predict_mean, reference = test1$Class)
+
+```
+
+```{r neural net mean roc Mean}
+
+# Plot ROC
+plot(x = roc(predictor = nnet_mean$pred$aml, response = nnet_mean$pred$obs)$specificities, y = roc(predictor = nnet_mean$pred$normal, response = nnet_mean$pred$obs)$sensitivities, col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = nnet_mean$pred$aml, 
+      response = nnet_mean$pred$obs)$auc, 
+      sep = ""), col = c("#blue"), fill = c("blue"))
+
+```
+
+---
+
+
+
+---
+
+Neural Network 2
+
+---
+
+```{r Neural Network 2 Mean}
+
+#Set control
+ctrl <- trainControl(method = "repeatedcv", number = 2, repeats = 5, classProbs = TRUE, savePredictions = T)
+
+#Decrease 'by' to increase accurary
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 2, by = 0.5),
+                        decay = seq(from = 0.1, to = 0.3, by = 0.05))
+
+set.seed(1112)
+
+#train data frame using neural network methods, tune to nnetGrid
+nnet_mean1 <- train(Class ~ FS + SS + FL3, data = training1, method = "nnet", trControl = ctrl,tuneGrid = nnetGrid, verbose = F)
+
+nnet_mean1
+
+```
+
+```{r neural network 2 prediction Mean}
+
+# Predict neural network
+nn_predict_mean1 <- predict(nnet_mean1, newdata = test1)
+
+# Confusion matrix
+confusionMatrix(nn_predict_mean1, reference = test1$Class)
+
+```
+
+```{r neural net mean roc 2 Mean}
+
+# Plot ROC
+plot(x = roc(predictor = nnet_mean1$pred$aml, response = nnet_mean1$pred$obs)$specificities, y = roc(predictor = nnet_mean1$pred$normal, response = nnet_mean1$pred$obs)$sensitivities, col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = nnet_mean1$pred$aml, 
+      response = nnet_mean1$pred$obs)$auc, 
+      sep = ""), col = c("blue"), fill = c("blue"))
+
+```
+
+---
+
+
+
+---
+
+
+
+---
+
+## Machine Learning Algorithms: df mean normalized to control
+
+---
+
+
+---
+
+```{r Training and Test Sets df_norm_class}
+
+# Establish the training data set size 
+train_size2 <- floor(0.75 * nrow(df_norm_class))
+train_size2
+
+# Take a random sample and make this into the training set
+set.seed(1234)
+training_pos2 <- sample(seq_len(nrow(df_norm_class)), size = train_size2)
+
+# Define the training set and the test set
+training2 <- df_norm_class[training_pos2,]
+test2 <- df_norm_class[-training_pos2,]
+
+# Check the dimensions (row/column) of the training and test sets
+dim(training2)
+dim(test2)
+
+```
+
+---
+
+
+
+---
+
+## Linear Discriminant Analysis
+
+---
+
+```{r LDA normalized}
+
+# Train using LDA
+LDA_norm <- lda(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training2, cv= T)
+
+```
+
+```{r View LDA normalized}
+
+# View LDA
+LDA_norm
+
+```
+
+```{r Predict LDA normalized}
+
+# Predict LDA
+LDA_predict_norm <- predict(LDA_norm, newdata=test2)
+
+# LDA confusino matrix
+confusionMatrix(LDA_predict_norm$class, reference = test2$Class)
+
+```
+
+---
+
+
+
+---
+
+## Classification Tree Normalized
+
+---
+
+
+```{r Classification tree normalized}
+
+# Classification Tree
+set.seed(828282)
+class_tree_norm <- tree(Class ~ FS + SS + FL3, data = training2, split = "gini")
+
+plot(class_tree)
+text(class_tree,cex=0.45)
+
+```
+
+```{r Summary Classification Tree normalized}
+
+# View classification summary
+summary(class_tree_norm)
+
+```
+
+```{r Test Classification tree normalized}
+
+# Predict classification tree
+class_tree_test_norm <- predict(class_tree_norm, newdata = test2, type = "class")
+
+# Confusion Matrix
+confusionMatrix(class_tree_test_norm, reference = test2$Class)
+
+```
+
+```{r fit classification tree normalized}
+
+# Fit classification tree
+fit_class_tree_norm <- cv.tree(class_tree_norm, FUN=prune.misclass, K = 15)
+fit_class_tree_norm
+
+```
+
+```{r prune classification tree normalized}
+
+# Prune classification tree
+prune_class_tree_norm = prune.misclass(class_tree_norm, best = 4)
+
+plot(prune_class_tree_norm)
+text(prune_class_tree_norm, cex=0.45)
+
+```
+
+```{r test pruned classification tree normalized}
+
+# Predict pruned classification tree
+class_tree_test_pruned_norm <- predict(prune_class_tree_norm, newdata = test2, type = "class")
+
+# Confusion matrix
+confusionMatrix(class_tree_test_pruned_norm, reference = test2$Class)
+
+```
+
+```{r PCC classification tree normalized}
+
+# PCC for classification tree
+cm_tree_norm <- table(pred=class_tree_test_norm, true = test2$Class)
+cm_tree_norm
+
+pcc(cm_tree_norm, st.dev=TRUE)
+classification_test <- predict(class_tree_norm, newdata = test2, type = "class")
+
+```
+
+---
+
+
+
+---
+
+## Random Forest Normalized
+
+---
+
+```{r Random Forest Normalized}
+
+set.seed(8686)
+
+# Set control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train using random forest on all variables 
+RF1_norm <- train(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training2, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, method = 'rf')
+
+```
+
+```{r View random forest summary Normalized}
+
+# View random forest
+RF1_norm
+
+```
+
+```{r Random Forest Cross Validation Normalized}
+
+set.seed(7777)
+
+# Test Random Forest
+RF_predict1_norm <- predict(RF1_norm, newdata = test2)
+
+# View confustion Matrix 
+confusionMatrix(RF_predict1_norm, reference = test2$Class)
+
+```
+
+```{r Random Forest ROC Normalized}
+
+# Plot the roc curve for sensitivity and specificity
+plot(x = roc(predictor = RF1_norm$pred$aml, 
+             response = RF1_norm$pred$obs)$specificities, 
+     y = roc(predictor = RF1_norm$pred$normal, 
+             response = RF1_norm$pred$obs)$sensitivities, 
+     col= "blue", xlim = c(1, 0), type ="l", ylab = "Sensitivity", 
+     xlab = "Specificity")
+
+# Add legend with the area under the curve  
+legend("bottomright", legend = paste("AML v NORMAL --", 
+      roc(predictor = RF1_norm$pred$aml, 
+      response = RF1_norm$pred$obs)$auc, 
+      sep = ""), col = c("blue"), fill = c("blue"))
+
+```
+
+---
+
+
+
+---
+
+## Bagged Random Forest Normalized
+
+---
+
+```{r Bagged Tree 1 Normalized}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 2, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification
+bagged1_norm <- randomForest(Class ~ FS + SS + FL1 + FL2 + FL3 + FL4 + FL5, data = training2, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 7)
+
+```
+
+```{r View bagged tree summary 1 Normalized}
+
+# Bagged tree summary
+bagged1_norm
+
+```
+
+```{r Bagged ROC 1 Normalized}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc1 <- roc(training2$Class, bagged1$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc1, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+
+```
+
+```{r Bagged Tree Cross Validation 1 Normalized}
+
+# Test bagged tree
+bagged_predict1_norm <- predict(bagged1_norm, newdata = test2)
+
+# View confusion matrix
+confusionMatrix(bagged_predict1_norm, reference = test2$Class)
+
+```
+
+---
+
+
+
+---
+
+## Bagged 2 Normalized
+
+---
+
+```{r Bagged Tree 2 Normalized}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 20, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification on selected features and FL3 (supported by literature)
+bagged2_norm <- randomForest(Class ~ FS + SS + FL3, data = training2, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 3, ntree = 5000)
+
+```
+
+```{r View bagged tree summary 2 Normalized}
+
+# Bagged tree summary
+bagged2_norm
+
+```
+
+```{r Bagged ROC 2 Normalized}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc2 <- roc(training2$Class, bagged2_norm$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc2, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+
+```
+
+```{r Bagged Tree Cross Validation 2 Normalized}
+
+set.seed(888)
+
+# Test bagged tree
+bagged_predict2_norm <- predict(bagged2_norm, newdata = test2)
+
+# View confusion matrix
+confusionMatrix(bagged_predict2_norm, reference = test2$Class)
+
+```
+
+---
+
+
+---
+
+## Bagged 3 Normalized
+
+---
+
+```{r Bagged Tree 3 Normalized}
+
+set.seed(888)
+
+# Set Control
+ctrl <- trainControl(method = "repeatedcv", repeats = 20, classProbs = T, savePredictions = T)
+
+# Train bagged tree classification using scatter
+bagged3_norm <- randomForest(Class ~ FS + SS, data = training2, importance = TRUE, oob.times = 15, confusion = TRUE, trControl = ctrl, mtry = 2, ntree = 5000)
+
+```
+
+```{r View bagged tree summary 3 Normalized}
+
+# Bagged tree summary
+bagged3_norm
+
+```
+
+```{r bagged ROC 3 Normalized}
+
+# Calculate ROC curve with AUC for Bagged Tree
+rf.roc3 <- roc(training2$Class, bagged3_norm$votes[,2])
+
+# Plot the ROC curve and print the AUC in the bottom right corner
+plot(rf.roc3, print.auc = TRUE, col = "blue", print.auc.x = 0.0, print.auc.y = 0.1, print.auc.cex = 1.5, ylim = c(0,1), xlim = c(1,0), add = FALSE)
+
+```
+
+```{r Bagged Tree Cross Validation 3 Normalized}
+
+set.seed(888)
+
+# Test bagged tree
+bagged_predict3_norm <- predict(bagged3_norm, newdata = test2)
+
+# View confusion matrix
+confusionMatrix(bagged_predict3_norm, reference = test2$Class)
+
+```
+
+
+
+---
+
+
+---
+
+
+
